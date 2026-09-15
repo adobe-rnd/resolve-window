@@ -1,0 +1,199 @@
+name: Release
+
+# Releases are cut from this workflow rather than by pushing a tag by hand, so that the
+# tests, the semver arithmetic and the moving major alias cannot drift apart.
+#
+# Consumers of a GitHub Action pin to a tag, and the convention is a moving major alias:
+# `uses: adobe-rnd/resolve-window@v1` follows every 1.x release, while
+# `uses: adobe-rnd/resolve-window@v1.2.3` is immutable. Both are produced here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Which part of the version to increment'
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry-run:
+        description: 'Compute the next version and stop, without tagging or releasing'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Two releases at once would race over the major alias.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the whole tag history, to find the current version
+
+      # --- gates ------------------------------------------------------------
+      # Nothing is tagged before the suite passes. A broken action that has already been
+      # tagged cannot be un-released: consumers on the major alias would pick it up.
+
+      - name: Unit tests
+        run: bash tests/resolve-window.test.sh
+
+      - name: Action contract
+        run: bash tests/action-contract.test.sh
+
+      - name: Smoke test the action itself
+        id: smoke
+        uses: ./
+        with:
+          override-start-time: 30m
+
+      - name: The smoke test must have produced a window
+        env:
+          SOURCE: ${{ steps.smoke.outputs.source }}
+          FROM: ${{ steps.smoke.outputs.from }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE" != 'override' ] || [ -z "$FROM" ]; then
+            echo "::error::the action did not resolve a window (source='$SOURCE' from='$FROM')"
+            exit 1
+          fi
+          echo "smoke ok: from=$FROM"
+
+      # --- version ----------------------------------------------------------
+
+      - name: Compute the next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+
+          CURRENT=$(git tag -l 'v*.*.*' | sed 's/^v//' | sort -V | tail -1)
+          if [ -z "$CURRENT" ]; then
+            CURRENT='0.0.0'
+            echo "no released version yet, starting from $CURRENT"
+          fi
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+            *) echo "::error::unknown bump '$BUMP'"; exit 1 ;;
+          esac
+
+          NEXT="$MAJOR.$MINOR.$PATCH"
+          if git rev-parse -q --verify "refs/tags/v$NEXT" >/dev/null; then
+            echo "::error::tag v$NEXT already exists. The tag list and the computed bump disagree."
+            exit 1
+          fi
+
+          {
+            echo "current=$CURRENT"
+            echo "next=$NEXT"
+            echo "tag=v$NEXT"
+            echo "major=v$MAJOR"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "v$CURRENT -> v$NEXT (alias v$MAJOR)"
+
+      - name: Stop here on a dry run
+        if: inputs.dry-run
+        env:
+          CURRENT: ${{ steps.version.outputs.current }}
+          TAG: ${{ steps.version.outputs.tag }}
+          MAJOR: ${{ steps.version.outputs.major }}
+        run: |
+          {
+            echo "### Dry run"
+            echo ""
+            echo "Would release **$TAG** (from v$CURRENT) and move the **$MAJOR** alias to \`$GITHUB_SHA\`."
+            echo ""
+            echo "Nothing was tagged."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- tag and release --------------------------------------------------
+
+      - name: Tag and release
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          MAJOR: ${{ steps.version.outputs.major }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # The immutable version tag, annotated so it carries a date and an author.
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "refs/tags/$TAG"
+          echo "pushed $TAG"
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --latest
+          echo "created the release for $TAG"
+
+          # The moving alias, pointed straight at the commit so it never dereferences
+          # through the annotated tag object.
+          git tag -f "$MAJOR" "$GITHUB_SHA"
+          git push origin -f "refs/tags/$MAJOR"
+          echo "moved $MAJOR to $GITHUB_SHA"
+
+      # --- verify what consumers will actually resolve -----------------------
+      # `uses:` cannot take an expression, so a freshly cut tag cannot be exercised with
+      # `uses: adobe-rnd/resolve-window@<new tag>` from inside this run. The refs are
+      # therefore checked through the API instead.
+
+      - name: Verify both tags resolve to this commit
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          MAJOR: ${{ steps.version.outputs.major }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          for ref in "$TAG" "$MAJOR"; do
+            sha=$(gh api "/repos/$GITHUB_REPOSITORY/commits/$ref" --jq '.sha')
+            [ "$sha" = "$GITHUB_SHA" ] \
+              || fail "$ref resolves to $sha, expected $GITHUB_SHA"
+
+            # A tag that resolves but has no action.yml is useless to a consumer.
+            name=$(gh api "/repos/$GITHUB_REPOSITORY/contents/action.yml?ref=$ref" --jq '.name')
+            [ "$name" = 'action.yml' ] || fail "action.yml is missing at $ref"
+
+            echo "$ref -> $sha, action.yml present"
+          done
+
+      - name: Summary
+        if: ${{ !inputs.dry-run }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          MAJOR: ${{ steps.version.outputs.major }}
+        run: |
+          {
+            echo "### Released $TAG"
+            echo ""
+            echo "| ref | meaning |"
+            echo "| --- | --- |"
+            echo "| \`$TAG\` | immutable, this commit forever |"
+            echo "| \`$MAJOR\` | moving alias, now at this commit |"
+            echo ""
+            echo "Consumers should use:"
+            echo ""
+            echo '```yaml'
+            echo "      - uses: $GITHUB_REPOSITORY@$MAJOR"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

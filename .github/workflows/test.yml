@@ -1,0 +1,137 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    # macOS is not redundant here: the script and the test harness both fall back from
+    # GNU `date -u -d` to BSD `date -u -j -f`, and this leg is what proves the fallback
+    # works rather than merely existing.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Report the shell in use
+        run: bash --version | head -1
+
+      - name: resolve-window.sh
+        run: bash tests/resolve-window.test.sh
+
+      - name: action.yml contract
+        run: bash tests/action-contract.test.sh
+
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: shellcheck --severity=style resolve-window.sh tests/resolve-window.test.sh tests/action-contract.test.sh
+
+  integration:
+    name: Integration (the action as a caller sees it)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # the action reads this workflow's own run history
+    steps:
+      - uses: actions/checkout@v7
+
+      # Deterministic leg: an override needs no run history at all, so this asserts the
+      # composite wiring and every output independently of what this repo has run before.
+      - name: Resolve from an override
+        id: override
+        uses: ./
+        with:
+          override-start-time: 2h
+          overlap-seconds: 60
+
+      - name: The override outputs must be complete and consistent
+        env:
+          SOURCE: ${{ steps.override.outputs.source }}
+          FROM: ${{ steps.override.outputs.from }}
+          FROM_EPOCH: ${{ steps.override.outputs.from-epoch }}
+          FROM_MS: ${{ steps.override.outputs.from-ms }}
+          TO_EPOCH: ${{ steps.override.outputs.to-epoch }}
+          AGE_SECONDS: ${{ steps.override.outputs.age-seconds }}
+          IS_CATCHUP: ${{ steps.override.outputs.is-catchup }}
+          SCANNED: ${{ steps.override.outputs.runs-scanned }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "$SOURCE" = 'override' ] || fail "source should be override, got '$SOURCE'"
+          [ "$SCANNED" = '0' ] || fail "an override must not read the run history, but scanned $SCANNED run(s)"
+          [[ "$FROM" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+            || fail "from is not RFC 3339: '$FROM'"
+          [ "$FROM_MS" = "$((FROM_EPOCH * 1000))" ] \
+            || fail "from-ms ($FROM_MS) is not from-epoch ($FROM_EPOCH) in millis"
+          [ "$FROM_EPOCH" -lt "$TO_EPOCH" ] || fail "from ($FROM_EPOCH) is not before to ($TO_EPOCH)"
+          # 2h back, minus a 60s overlap, so 7260s give or take the runtime of the step.
+          [ "$AGE_SECONDS" -ge 7190 ] && [ "$AGE_SECONDS" -le 7300 ] \
+            || fail "age-seconds should be about 7200 for a 2h override, got $AGE_SECONDS"
+          [ "$IS_CATCHUP" = 'false' ] || fail "a 2h window should not be flagged as a catch-up"
+          echo "override leg ok: from=$FROM age=${AGE_SECONDS}s"
+
+      # Live leg: really calls the runs API. initial-window keeps the very first run of
+      # this workflow green, when by definition nothing has succeeded yet.
+      - name: Resolve from the real run history
+        id: live
+        uses: ./
+        with:
+          initial-window: 7d
+
+      - name: The live outputs must be plausible
+        env:
+          SOURCE: ${{ steps.live.outputs.source }}
+          WATERMARK: ${{ steps.live.outputs.watermark }}
+          FROM_EPOCH: ${{ steps.live.outputs.from-epoch }}
+          TO_EPOCH: ${{ steps.live.outputs.to-epoch }}
+          PAGES: ${{ steps.live.outputs.pages-scanned }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          case "$SOURCE" in
+            last-success) echo "found a previous successful run: $WATERMARK" ;;
+            initial-window) echo "no successful run yet, used initial-window: $WATERMARK" ;;
+            *) fail "unexpected source '$SOURCE'" ;;
+          esac
+          [[ "$WATERMARK" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+            || fail "watermark is not RFC 3339: '$WATERMARK'"
+          [ "$FROM_EPOCH" -lt "$TO_EPOCH" ] || fail "from is not before to"
+          if [ "$SOURCE" = 'last-success' ] && [ "$PAGES" -lt 1 ]; then
+            fail "a resolved watermark must have taken at least one page, got $PAGES"
+          fi
+
+      # Negative leg: the action must fail loudly on a workflow that does not exist,
+      # rather than returning an empty window that would silently process nothing.
+      - name: A missing workflow must fail
+        id: missing
+        continue-on-error: true
+        uses: ./
+        with:
+          workflow: this-workflow-does-not-exist.yml
+
+      - name: Confirm the missing workflow failed
+        env:
+          OUTCOME: ${{ steps.missing.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" != 'failure' ]; then
+            echo "::error::a nonexistent workflow should fail the action, but the outcome was '$OUTCOME'"
+            exit 1
+          fi
+          echo "missing-workflow leg ok: the action failed as it should"

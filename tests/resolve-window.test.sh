@@ -21,22 +21,32 @@ if [ ! -f "$SCRIPT" ]; then
   exit 1
 fi
 
+# epoch seconds -> RFC 3339 UTC. GNU date first, BSD/macOS second, so the suite runs on
+# a macOS runner and therefore actually exercises the script's own date fallback.
+iso() {
+  local e="$1" out
+  if out=$(date -u -d "@$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null); then printf '%s\n' "$out"; return 0; fi
+  if out=$(date -u -r "$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null); then printf '%s\n' "$out"; return 0; fi
+  echo "no usable date(1) for epoch->ISO conversion" >&2
+  exit 1
+}
+
 pass=0
 fail=0
 case_name=''
 
 # A fixed "now" so every expected timestamp is arithmetic, not wall-clock.
 NOW=1789000000
-NOW_ISO=$(date -u -d "@$NOW" +%Y-%m-%dT%H:%M:%SZ)
+NOW_ISO=$(iso $NOW)
 
 WM_EPOCH=$((NOW - 1200))                                    # 20 minutes ago
-WM=$(date -u -d "@$WM_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+WM=$(iso $WM_EPOCH)
 OLD_EPOCH=$((NOW - 30 * 3600))                              # 30 hours ago
-OLD=$(date -u -d "@$OLD_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+OLD=$(iso $OLD_EPOCH)
 NEWER_EPOCH=$((NOW - 600))                                  # 10 minutes ago
-NEWER=$(date -u -d "@$NEWER_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+NEWER=$(iso $NEWER_EPOCH)
 FUTURE_EPOCH=$((NOW + 900))                                 # 15 minutes ahead
-FUTURE=$(date -u -d "@$FUTURE_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+FUTURE=$(iso $FUTURE_EPOCH)
 
 WORKDIR=$(mktemp -d)
 
@@ -180,7 +190,7 @@ run_script "$D"
 expect_rc 0
 expect_output source 'last-success'
 expect_output watermark "$WM"
-expect_output from "$(date -u -d "@$((WM_EPOCH - 60))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output from "$(iso $((WM_EPOCH - 60)))"
 expect_output from-epoch "$((WM_EPOCH - 60))"
 expect_output from-ms "$(((WM_EPOCH - 60) * 1000))"
 expect_output to "$NOW_ISO"
@@ -267,7 +277,7 @@ start 'uses initial-window when nothing has ever succeeded'
 run_script "$D" INITIAL_WINDOW='24h'
 expect_rc 0
 expect_output source 'initial-window'
-expect_output watermark "$(date -u -d "@$((NOW - 86400))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output watermark "$(iso $((NOW - 86400)))"
 expect_output from-epoch "$((NOW - 86400 - 60))"
 expect_output is-catchup 'true'
 expect_stderr_has 'brand-new workflow'
@@ -315,13 +325,13 @@ start 'override-start-time accepts a duration'
 run_script "$D" OVERRIDE_START_TIME='2h'
 expect_rc 0
 expect_output source 'override'
-expect_output watermark "$(date -u -d "@$((NOW - 7200))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output watermark "$(iso $((NOW - 7200)))"
 
 start 'override wins over an empty run history'
 D=$(new_fixture_dir)
 run_script "$D" OVERRIDE_START_TIME='45m'
 expect_rc 0
-expect_output watermark "$(date -u -d "@$((NOW - 2700))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output watermark "$(iso $((NOW - 2700)))"
 
 start 'rejects an unparseable override-start-time'
 run_script "$D" OVERRIDE_START_TIME='yesterday-ish'
@@ -333,13 +343,13 @@ expect_stderr_has 'OVERRIDE_START_TIME is neither a duration'
 start 'understands s, m, h and d durations'
 D=$(new_fixture_dir)
 run_script "$D" OVERRIDE_START_TIME='90s'
-expect_output watermark "$(date -u -d "@$((NOW - 90))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output watermark "$(iso $((NOW - 90)))"
 run_script "$D" OVERRIDE_START_TIME='45m'
-expect_output watermark "$(date -u -d "@$((NOW - 2700))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output watermark "$(iso $((NOW - 2700)))"
 run_script "$D" OVERRIDE_START_TIME='12h'
-expect_output watermark "$(date -u -d "@$((NOW - 43200))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output watermark "$(iso $((NOW - 43200)))"
 run_script "$D" OVERRIDE_START_TIME='7d'
-expect_output watermark "$(date -u -d "@$((NOW - 604800))" +%Y-%m-%dT%H:%M:%SZ)"
+expect_output watermark "$(iso $((NOW - 604800)))"
 
 # --- 11. the overlap -------------------------------------------------------
 
@@ -398,7 +408,7 @@ GH_OUT="$WORKDIR/gh_output"
 run_script "$D" GITHUB_OUTPUT="$GH_OUT"
 expect_rc 0
 expect_eq "$case_name: from in GITHUB_OUTPUT" \
-  "from=$(date -u -d "@$((WM_EPOCH - 60))" +%Y-%m-%dT%H:%M:%SZ)" \
+  "from=$(iso $((WM_EPOCH - 60)))" \
   "$(grep '^from=' "$GH_OUT")"
 expect_eq "$case_name: every stdout pair is in GITHUB_OUTPUT" \
   "$(printf '%s\n' "$OUT" | grep -c '=')" \
