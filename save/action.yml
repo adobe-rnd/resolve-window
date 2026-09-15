@@ -114,7 +114,7 @@ runs:
     # Cache entries are immutable, so the key carries run_id AND run_attempt: a retried
     # attempt must not collide with its own earlier attempt, which it could not overwrite.
     # The restore side matches on the prefix and takes the most recent.
-    - uses: actions/cache/save@v4
+    - uses: actions/cache/save@v6
       with:
         path: ${{ steps.paths.outputs.dir }}
         key: ${{ steps.paths.outputs.key-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}

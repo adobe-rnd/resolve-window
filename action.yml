@@ -185,7 +185,7 @@ runs:
     # retried attempt hits its own first attempt's partial state and then cannot save.
     - id: cache-restore
       if: ${{ inputs.checkpoint == 'true' }}
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: ${{ steps.checkpoint-paths.outputs.dir }}
         key: ${{ steps.checkpoint-paths.outputs.key-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}
