@@ -1,0 +1,159 @@
+name: Resolve Window
+description: >-
+  Resolve the watermark for an incremental job - the time of this workflow's last
+  successful run - and derive the processing window from it, with an overlap for
+  upstream eventual consistency.
+author: Adobe
+
+branding:
+  icon: clock
+  color: blue
+
+inputs:
+  workflow:
+    description: >-
+      Workflow file name whose run history defines the watermark, e.g. track-publishes.yml.
+      Defaults to the workflow that is calling this action.
+    required: false
+    default: ''
+  repository:
+    description: 'owner/repo to read the run history from. Defaults to the current repository.'
+    required: false
+    default: ''
+  branch:
+    description: >-
+      Only count runs on this branch. Defaults to the current branch, which is what a
+      scheduled workflow wants. Pass '*' to count runs on any branch.
+    required: false
+    default: ''
+  exclude-run-id:
+    description: >-
+      Run id to ignore when scanning. Defaults to the current run, so a re-run of a
+      previously successful run cannot adopt itself as its own watermark.
+    required: false
+    default: ''
+  overlap-seconds:
+    description: >-
+      Seconds subtracted from the watermark to produce `from`. This is a deliberate
+      re-read to tolerate eventual consistency in the API being drained, so expect the
+      window to re-deliver entries near its lower edge and dedupe downstream.
+    required: false
+    default: '60'
+  max-pages:
+    description: >-
+      Pages of run history to scan (100 runs per page) before giving up. One page is not
+      always enough: an outage or a cancel-in-progress backlog can fill 100 consecutive
+      runs with no success.
+    required: false
+    default: '10'
+  per-page:
+    description: 'Runs requested per page, 1 to 100.'
+    required: false
+    default: '100'
+  wide-window-hours:
+    description: >-
+      Emit a warning when the resolved window is at least this many hours wide, which
+      means the job is catching up after a gap rather than running on schedule.
+    required: false
+    default: '6'
+  override-start-time:
+    description: >-
+      Skip the run history entirely and start from this point. Accepts a timestamp or a
+      duration (30s, 45m, 12h, 7d). Wire this to a workflow_dispatch input to give
+      operators a recovery path after an outage longer than max-pages can cover.
+    required: false
+    default: ''
+  initial-window:
+    description: >-
+      Fallback used ONLY when no run of the workflow has ever succeeded, as a duration or
+      a timestamp. Leave empty to fail instead, which is the safer default for an
+      established workflow: a guessed window silently skips everything before it.
+    required: false
+    default: ''
+  github-token:
+    description: 'Token used to read the run history. Needs `actions: read`.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  source:
+    description: 'How the watermark was determined: override, last-success or initial-window.'
+    value: ${{ steps.resolve.outputs.source }}
+  watermark:
+    description: 'Start of the window before the overlap is applied, RFC 3339.'
+    value: ${{ steps.resolve.outputs.watermark }}
+  from:
+    description: 'Start of the window, RFC 3339. This is watermark minus overlap-seconds.'
+    value: ${{ steps.resolve.outputs.from }}
+  from-epoch:
+    description: 'Start of the window, epoch seconds.'
+    value: ${{ steps.resolve.outputs.from-epoch }}
+  from-ms:
+    description: 'Start of the window, epoch milliseconds, for APIs that want millis.'
+    value: ${{ steps.resolve.outputs.from-ms }}
+  to:
+    description: 'End of the window, RFC 3339, evaluated when the action ran.'
+    value: ${{ steps.resolve.outputs.to }}
+  to-epoch:
+    description: 'End of the window, epoch seconds.'
+    value: ${{ steps.resolve.outputs.to-epoch }}
+  to-ms:
+    description: 'End of the window, epoch milliseconds.'
+    value: ${{ steps.resolve.outputs.to-ms }}
+  age-hours:
+    description: 'Whole hours between the watermark and now.'
+    value: ${{ steps.resolve.outputs.age-hours }}
+  age-seconds:
+    description: 'Seconds between the watermark and now.'
+    value: ${{ steps.resolve.outputs.age-seconds }}
+  is-catchup:
+    description: 'true when the window is at least wide-window-hours wide.'
+    value: ${{ steps.resolve.outputs.is-catchup }}
+  runs-scanned:
+    description: 'How many runs were examined to find the watermark.'
+    value: ${{ steps.resolve.outputs.runs-scanned }}
+  pages-scanned:
+    description: 'How many pages of run history were fetched.'
+    value: ${{ steps.resolve.outputs.pages-scanned }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        WORKFLOW: ${{ inputs.workflow }}
+        REPOSITORY: ${{ inputs.repository }}
+        BRANCH: ${{ inputs.branch }}
+        EXCLUDE_RUN_ID: ${{ inputs.exclude-run-id }}
+        OVERLAP_SECONDS: ${{ inputs.overlap-seconds }}
+        MAX_PAGES: ${{ inputs.max-pages }}
+        PER_PAGE: ${{ inputs.per-page }}
+        WIDE_WINDOW_HOURS: ${{ inputs.wide-window-hours }}
+        OVERRIDE_START_TIME: ${{ inputs.override-start-time }}
+        INITIAL_WINDOW: ${{ inputs.initial-window }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        # Defaults that need a context the `default:` field cannot reach reliably.
+        if [ -z "${WORKFLOW:-}" ]; then
+          ref="${GITHUB_WORKFLOW_REF%%@*}"
+          WORKFLOW="${ref##*/}"
+        fi
+        if [ -z "${REPOSITORY:-}" ]; then
+          REPOSITORY="$GITHUB_REPOSITORY"
+        fi
+        if [ -z "${BRANCH:-}" ]; then
+          # Empty means "the current branch" here. The script itself treats an empty
+          # BRANCH as "any branch", so it is resolved before the call, not passed through.
+          BRANCH="$GITHUB_REF_NAME"
+        fi
+        if [ -z "${EXCLUDE_RUN_ID:-}" ]; then
+          EXCLUDE_RUN_ID="$GITHUB_RUN_ID"
+        fi
+        export WORKFLOW REPOSITORY BRANCH EXCLUDE_RUN_ID
+
+        # Invoked through bash rather than executed, so the action does not depend on the
+        # executable bit surviving checkout, packaging or a Windows filesystem.
+        bash "$GITHUB_ACTION_PATH/resolve-window.sh"
