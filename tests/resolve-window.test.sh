@@ -494,7 +494,8 @@ if [ -z "$url_line" ]; then
   bad 'the runs URL could not be found in the script'
 else
   case "$url_line" in
-    *status=* | *conclusion=* | *branch=* | *head_branch=*)
+    # *branch=* also covers head_branch=, which contains it.
+    *status=* | *conclusion=* | *branch=*)
       bad "the runs URL sends a server-side filter, which is not dependable at scale: $url_line"
       ;;
     *)
