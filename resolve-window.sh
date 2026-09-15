@@ -20,6 +20,7 @@
 #   MAX_PAGES             run-history pages to scan                 (default 10)
 #   PER_PAGE              runs per page, max 100                    (default 100)
 #   WIDE_WINDOW_HOURS     warn when the window is at least this old (default 6)
+#   CHECKPOINT_TIMESTAMP  watermark from a restored checkpoint      (optional)
 #   OVERRIDE_START_TIME   skip the API and use this start           (optional)
 #   INITIAL_WINDOW        first-run fallback: duration or timestamp (optional)
 #   GITHUB_TOKEN          token for the runs API                    (required unless fixtures)
@@ -31,7 +32,11 @@
 #
 # The contract has exactly three outcomes, and two of them are fatal on purpose:
 #
-#   0  A watermark was resolved. Sets source=override|last-success|initial-window.
+#   0  A watermark was resolved. Sets source to one of:
+#        override        an explicit start was supplied
+#        checkpoint      the data's own clock, from a restored checkpoint
+#        last-success    the created_at of this workflow's last successful run
+#        initial-window  nothing has ever succeeded, and a first window was given
 #
 #   1  THE WINDOW COULD NOT BE BOUNDED: the page cap was reached while runs remained
 #      unscanned. Always fatal, and deliberately not configurable. Any fallback here
@@ -60,6 +65,7 @@ OVERLAP_SECONDS="${OVERLAP_SECONDS:-60}"
 MAX_PAGES="${MAX_PAGES:-10}"
 PER_PAGE="${PER_PAGE:-100}"
 WIDE_WINDOW_HOURS="${WIDE_WINDOW_HOURS:-6}"
+CHECKPOINT_TIMESTAMP="${CHECKPOINT_TIMESTAMP:-}"
 OVERRIDE_START_TIME="${OVERRIDE_START_TIME:-}"
 INITIAL_WINDOW="${INITIAL_WINDOW:-}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
@@ -193,7 +199,17 @@ if [ -n "$OVERRIDE_START_TIME" ]; then
   note "watermark $watermark (from OVERRIDE_START_TIME=$OVERRIDE_START_TIME; the run history was not consulted)"
 fi
 
-# The run history is consulted only when no override supplied a watermark.
+# A checkpoint timestamp comes from the drained API's own data, so it is preferred over
+# GitHub's run history: it is immune to Actions queue delay and to clock skew between the
+# runner and the API. An explicit override still outranks it.
+if [ -z "$watermark" ] && [ -n "$CHECKPOINT_TIMESTAMP" ]; then
+  start_epoch=$(resolve_start_spec "$CHECKPOINT_TIMESTAMP" 'CHECKPOINT_TIMESTAMP')
+  watermark=$(from_epoch "$start_epoch")
+  source_kind='checkpoint'
+  note "watermark $watermark (from the restored checkpoint; the run history was not consulted)"
+fi
+
+# The run history is the last resort, used only when nothing better supplied a watermark.
 if [ -z "$watermark" ]; then
   page=1
   while [ "$page" -le "$MAX_PAGES" ]; do

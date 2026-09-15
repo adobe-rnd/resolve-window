@@ -1,0 +1,123 @@
+name: Checkpoint smoke
+
+# Proves the checkpoint survives BETWEEN runs, which no single job can demonstrate.
+#
+# The Test workflow's checkpoint job uses a namespace unique per run attempt, so it always
+# starts cold and can assert the fallback path. That deliberately cannot test the part that
+# matters most in production: whether `actions/cache` really hands the checkpoint from one
+# run to the next. This workflow uses a FIXED namespace and advances the mark every run, so
+# the second and later runs must restore what their predecessor committed.
+#
+# A cache miss here is not necessarily a failure. Entries are evicted after 7 idle days, and
+# the weekly schedule sits close to that boundary on purpose - a miss must degrade to a
+# fallback window rather than to silence, and this is where that gets observed.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 6 * * 2'
+
+permissions:
+  contents: read
+  actions: read
+
+# Two runs committing at once would race over the same cache key.
+concurrency:
+  group: checkpoint-smoke
+  cancel-in-progress: false
+
+jobs:
+  handoff:
+    name: Restore what the previous run committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore the checkpoint
+        id: window
+        uses: ./
+        with:
+          checkpoint: 'true'
+          checkpoint-namespace: smoke
+          overlap-seconds: '60'
+          initial-window: 1h
+
+      - name: Whatever was restored must be self-consistent
+        id: check
+        env:
+          KIND: ${{ steps.window.outputs.checkpoint-kind }}
+          RESUMABLE: ${{ steps.window.outputs.resumable }}
+          SOURCE: ${{ steps.window.outputs.source }}
+          CP_TS: ${{ steps.window.outputs.checkpoint-timestamp }}
+          FROM: ${{ steps.window.outputs.from }}
+          FROM_EPOCH: ${{ steps.window.outputs.from-epoch }}
+          TO_EPOCH: ${{ steps.window.outputs.to-epoch }}
+          SCANNED: ${{ steps.window.outputs.runs-scanned }}
+          SEEN: ${{ steps.window.outputs.seen-ids-count }}
+          COMMITTED_RUN: ${{ steps.window.outputs.committed-run }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "$FROM_EPOCH" -lt "$TO_EPOCH" ] || fail "from is not before to"
+
+          if [ "$KIND" = 'none' ]; then
+            # First run, or the cache was evicted. Either way it must have fallen back to a
+            # window rather than produced nothing.
+            case "$SOURCE" in
+              last-success | initial-window) : ;;
+              *) fail "a cold checkpoint must fall back to a window, got source='$SOURCE'" ;;
+            esac
+            echo "cold start: no checkpoint, fell back to source=$SOURCE"
+            echo "resumed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          [ "$KIND" = 'timestamp' ] || fail "expected kind=timestamp, got '$KIND'"
+          [ "$RESUMABLE" = 'true' ] || fail "expected resumable=true, got '$RESUMABLE'"
+          [ -n "$CP_TS" ] || fail 'a restored checkpoint carried no timestamp'
+          [ "$SOURCE" = 'checkpoint' ] || fail "a restored checkpoint must drive the window, got source='$SOURCE'"
+          [ "$SCANNED" = '0' ] || fail "the run history should not have been read, but scanned $SCANNED"
+
+          echo "resumed from $CP_TS (committed by run $COMMITTED_RUN), $SEEN id(s) remembered"
+          echo "resumed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Advance the mark
+        id: commit
+        uses: ./save
+        with:
+          checkpoint-namespace: smoke
+          # `now` always moves forward, so the rewind guard should never trip here. If it
+          # ever does, either the clock went backwards or the guard has a bug.
+          timestamp: ${{ steps.window.outputs.to }}
+          seen-ids: run-${{ github.run_id }}-${{ github.run_attempt }}
+          seen-window-seconds: '60'
+
+      - name: The mark must have moved forward
+        env:
+          REWOUND: ${{ steps.commit.outputs.rewound }}
+          NEW_TS: ${{ steps.commit.outputs.timestamp }}
+          WANTED: ${{ steps.window.outputs.to }}
+          SEEN: ${{ steps.commit.outputs.seen-ids-count }}
+          PRUNED: ${{ steps.commit.outputs.seen-ids-pruned }}
+          RESUMED: ${{ steps.check.outputs.resumed }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "$REWOUND" = 'false' ] || fail 'the mark was rewound, which should be impossible here'
+          [ "$NEW_TS" = "$WANTED" ] || fail "expected the mark to become $WANTED, got $NEW_TS"
+
+          {
+            echo "### Checkpoint handoff"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| resumed from a predecessor | $RESUMED |"
+            echo "| mark now | \`$NEW_TS\` |"
+            echo "| ids remembered | $SEEN (pruned $PRUNED) |"
+            echo ""
+            if [ "$RESUMED" != 'true' ]; then
+              echo "This run started cold. Dispatch again: the next run must resume from \`$NEW_TS\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

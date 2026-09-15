@@ -1,0 +1,120 @@
+name: Save Window Checkpoint
+description: >-
+  Commit the position this run reached, so the next run resumes from it instead of
+  re-deriving a window from GitHub's run history.
+author: Adobe
+
+branding:
+  icon: bookmark
+  color: blue
+
+inputs:
+  timestamp:
+    description: >-
+      High-water mark from the drained DATA - the largest value of a monotonic field in
+      what the API returned, not the time the job ran. This is the recovery path for every
+      other tier, so supply it even when passing a cursor.
+    required: false
+    default: ''
+  cursor:
+    description: >-
+      A stream position, only if the API documents its cursor as valid in a LATER,
+      INDEPENDENT request. A pagination token scoped to one query's result set - such as
+      the AEM admin log's nextToken, "token to pass in next call to continue paging" - is
+      NOT valid here and will fail opaquely. When in doubt use timestamp.
+    required: false
+    default: ''
+  page:
+    description: >-
+      A page number, only for a stable append-at-end ordering. Log and event feeds are
+      usually newest-first, where a saved page number silently skips and re-reads.
+    required: false
+    default: ''
+  seen-ids:
+    description: >-
+      Newline-separated ids acted on in this run, remembered so the overlap cannot cause
+      a repeat. Bounded by seen-window-seconds, not by an arbitrary retention period.
+    required: false
+    default: ''
+  seen-ids-file:
+    description: 'A file of newline-separated ids acted on, as an alternative to seen-ids.'
+    required: false
+    default: ''
+  seen-window-seconds:
+    description: >-
+      How long to remember an id. Set this to the same value as the restore step's
+      overlap-seconds: that is provably exactly long enough to cover everything the
+      overlap can re-deliver, and no longer.
+    required: false
+    default: '60'
+  allow-rewind:
+    description: >-
+      Permit a timestamp older than the stored one. Off by default: a late batch that
+      happens to contain older records must not drag the mark backwards, or every
+      subsequent run re-reads the same span.
+    required: false
+    default: 'false'
+  checkpoint-namespace:
+    description: >-
+      Must match the value given to the restore step. Defaults, like the restore step, to
+      the calling workflow's file name.
+    required: false
+    default: ''
+  checkpoint-file:
+    description: >-
+      Explicit checkpoint path. Pass the restore step's checkpoint-file output to be
+      certain both sides address the same file.
+    required: false
+    default: ''
+
+outputs:
+  checkpoint-kind:
+    description: 'Which tier was committed: cursor, timestamp or page.'
+    value: ${{ steps.save.outputs.checkpoint-kind }}
+  timestamp:
+    description: 'The mark actually committed, which differs from the input if a rewind was refused.'
+    value: ${{ steps.save.outputs.timestamp }}
+  rewound:
+    description: 'true when the mark was deliberately moved backwards.'
+    value: ${{ steps.save.outputs.rewound }}
+  seen-ids-count:
+    description: 'How many ids are remembered after merging and pruning.'
+    value: ${{ steps.save.outputs.seen-ids-count }}
+  seen-ids-pruned:
+    description: 'How many ids fell outside the retention window and were dropped.'
+    value: ${{ steps.save.outputs.seen-ids-pruned }}
+  checkpoint-file:
+    description: 'Path of the checkpoint that was written.'
+    value: ${{ steps.paths.outputs.file }}
+
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.checkpoint-namespace }}
+        CHECKPOINT_FILE_OVERRIDE: ${{ inputs.checkpoint-file }}
+      # Shared with the restore side, so the file path and cache key cannot drift apart.
+      run: bash "$GITHUB_ACTION_PATH/../checkpoint-paths.sh"
+
+    - id: save
+      shell: bash
+      env:
+        CHECKPOINT_FILE: ${{ steps.paths.outputs.file }}
+        TIMESTAMP: ${{ inputs.timestamp }}
+        CURSOR: ${{ inputs.cursor }}
+        PAGE: ${{ inputs.page }}
+        SEEN_IDS: ${{ inputs.seen-ids }}
+        SEEN_IDS_FILE: ${{ inputs.seen-ids-file }}
+        SEEN_WINDOW_SECONDS: ${{ inputs.seen-window-seconds }}
+        ALLOW_REWIND: ${{ inputs.allow-rewind }}
+      run: bash "$GITHUB_ACTION_PATH/../save-checkpoint.sh"
+
+    # Cache entries are immutable, so the key carries run_id AND run_attempt: a retried
+    # attempt must not collide with its own earlier attempt, which it could not overwrite.
+    # The restore side matches on the prefix and takes the most recent.
+    - uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.paths.outputs.dir }}
+        key: ${{ steps.paths.outputs.key-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}

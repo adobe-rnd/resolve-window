@@ -70,6 +70,19 @@ inputs:
       established workflow: a guessed window silently skips everything before it.
     required: false
     default: ''
+  checkpoint:
+    description: >-
+      Restore a checkpoint committed by the previous run, and prefer its position over the
+      run history. Opt-in, because it adds a cache entry per run. Pair with the save action
+      to commit a new position after the drain succeeds.
+    required: false
+    default: 'false'
+  checkpoint-namespace:
+    description: >-
+      Names the checkpoint, so two jobs in one repository do not share a position. Defaults
+      to the calling workflow's file name. The save action must be given the same value.
+    required: false
+    default: ''
   github-token:
     description: 'Token used to read the run history. Needs `actions: read`.'
     required: false
@@ -115,10 +128,77 @@ outputs:
   pages-scanned:
     description: 'How many pages of run history were fetched.'
     value: ${{ steps.resolve.outputs.pages-scanned }}
+  checkpoint-kind:
+    description: >-
+      Which tier the checkpoint resolved from: cursor, timestamp, page, or none when there
+      was nothing to restore and the run history was used instead.
+    value: ${{ steps.restore-checkpoint.outputs.checkpoint-kind }}
+  resumable:
+    description: 'true when a checkpoint position was restored.'
+    value: ${{ steps.restore-checkpoint.outputs.resumable }}
+  cursor:
+    description: >-
+      The stream position to resume from, when the checkpoint recorded one. Only meaningful
+      if the API documents its cursor as valid in a later, independent request.
+    value: ${{ steps.restore-checkpoint.outputs.cursor }}
+  page:
+    description: 'The page number to resume from, when the checkpoint recorded one.'
+    value: ${{ steps.restore-checkpoint.outputs.page }}
+  checkpoint-timestamp:
+    description: >-
+      The high-water mark the checkpoint recorded, in the drained API's own time domain.
+      This is what `from` is derived from when a checkpoint was restored.
+    value: ${{ steps.restore-checkpoint.outputs.timestamp }}
+  committed-at:
+    description: >-
+      When the restored checkpoint was committed, as an ISO 8601 instant. Provenance: a mark
+      far older than the schedule suggests runs have been failing or cancelled.
+    value: ${{ steps.restore-checkpoint.outputs.committed-at }}
+  committed-run:
+    description: "Which run committed the restored checkpoint, as run_id-run_attempt."
+    value: ${{ steps.restore-checkpoint.outputs.committed-run }}
+  seen-ids-file:
+    description: >-
+      Path to a newline-separated list of ids already acted on, for suppressing what the
+      overlap re-delivers. Use with `grep -Fxf`.
+    value: ${{ steps.restore-checkpoint.outputs.seen-ids-file }}
+  seen-ids-count:
+    description: 'How many ids that file holds.'
+    value: ${{ steps.restore-checkpoint.outputs.seen-ids-count }}
+  checkpoint-file:
+    description: 'Path of the checkpoint file, to hand to the save action.'
+    value: ${{ steps.checkpoint-paths.outputs.file }}
 
 runs:
   using: composite
   steps:
+    # Derived here rather than in `default:` so the save action can reproduce it from the
+    # same inputs, and so the cache key and the file path cannot drift apart.
+    - id: checkpoint-paths
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.checkpoint-namespace }}
+      run: bash "$GITHUB_ACTION_PATH/checkpoint-paths.sh"
+
+    # A cache key must be unique, because entries are immutable and a repeated key is
+    # silently NOT overwritten. run_attempt matters as well as run_id: without it, a
+    # retried attempt hits its own first attempt's partial state and then cannot save.
+    - id: cache-restore
+      if: ${{ inputs.checkpoint == 'true' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.checkpoint-paths.outputs.dir }}
+        key: ${{ steps.checkpoint-paths.outputs.key-prefix }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ${{ steps.checkpoint-paths.outputs.key-prefix }}-
+
+    - id: restore-checkpoint
+      if: ${{ inputs.checkpoint == 'true' }}
+      shell: bash
+      env:
+        CHECKPOINT_FILE: ${{ steps.checkpoint-paths.outputs.file }}
+      run: bash "$GITHUB_ACTION_PATH/restore-checkpoint.sh"
+
     - id: resolve
       shell: bash
       env:
@@ -131,6 +211,7 @@ runs:
         PER_PAGE: ${{ inputs.per-page }}
         WIDE_WINDOW_HOURS: ${{ inputs.wide-window-hours }}
         OVERRIDE_START_TIME: ${{ inputs.override-start-time }}
+        CHECKPOINT_TIMESTAMP: ${{ steps.restore-checkpoint.outputs.timestamp }}
         INITIAL_WINDOW: ${{ inputs.initial-window }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |

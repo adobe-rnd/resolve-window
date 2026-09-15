@@ -28,7 +28,10 @@ jobs:
       - name: resolve-window.sh
         run: bash tests/resolve-window.test.sh
 
-      - name: action.yml contract
+      - name: checkpoint restore + save
+        run: bash tests/checkpoint.test.sh
+
+      - name: action contracts
         run: bash tests/action-contract.test.sh
 
   lint:
@@ -38,7 +41,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: shellcheck
-        run: shellcheck --severity=style resolve-window.sh tests/resolve-window.test.sh tests/action-contract.test.sh
+        run: shellcheck --severity=style ./*.sh tests/*.sh
 
   integration:
     name: Integration (the action as a caller sees it)
@@ -135,3 +138,129 @@ jobs:
             exit 1
           fi
           echo "missing-workflow leg ok: the action failed as it should"
+
+  checkpoint:
+    name: Checkpoint round trip
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    # The namespace is unique per run ATTEMPT so this job always starts with no checkpoint.
+    # A fixed namespace would make the job restore its own previous run's state, and the
+    # "nothing to restore" assertion below would pass once and then fail forever.
+    # Cross-run cache handoff is covered by checkpoint-smoke.yml instead.
+    env:
+      NS: ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: First pass - there is nothing to restore
+        id: first
+        uses: ./
+        with:
+          checkpoint: 'true'
+          checkpoint-namespace: ${{ env.NS }}
+          initial-window: 1h
+
+      - name: A cold checkpoint must fall back, not fail
+        env:
+          KIND: ${{ steps.first.outputs.checkpoint-kind }}
+          RESUMABLE: ${{ steps.first.outputs.resumable }}
+          SOURCE: ${{ steps.first.outputs.source }}
+          SEEN: ${{ steps.first.outputs.seen-ids-count }}
+          FILE: ${{ steps.first.outputs.checkpoint-file }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "$KIND" = 'none' ] || fail "expected kind=none on a cold start, got '$KIND'"
+          [ "$RESUMABLE" = 'false' ] || fail "expected resumable=false, got '$RESUMABLE'"
+          [ "$SEEN" = '0' ] || fail "expected no remembered ids, got '$SEEN'"
+          # It must still have produced a window, from the run history or initial-window.
+          case "$SOURCE" in
+            last-success | initial-window) echo "fell back to source=$SOURCE" ;;
+            *) fail "expected a fallback window, got source='$SOURCE'" ;;
+          esac
+          [ -n "$FILE" ] || fail 'no checkpoint-file was reported'
+
+      - name: Commit a checkpoint
+        id: commit
+        uses: ./save
+        with:
+          checkpoint-namespace: ${{ env.NS }}
+          timestamp: '2026-01-02T03:04:05Z'
+          seen-ids: |
+            alpha
+            beta
+          seen-window-seconds: '600'
+
+      - name: The commit must report what it wrote
+        env:
+          KIND: ${{ steps.commit.outputs.checkpoint-kind }}
+          TS: ${{ steps.commit.outputs.timestamp }}
+          SEEN: ${{ steps.commit.outputs.seen-ids-count }}
+          REWOUND: ${{ steps.commit.outputs.rewound }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "$KIND" = 'timestamp' ] || fail "expected kind=timestamp, got '$KIND'"
+          [ "$TS" = '2026-01-02T03:04:05Z' ] || fail "expected the mark back, got '$TS'"
+          [ "$SEEN" = '2' ] || fail "expected 2 remembered ids, got '$SEEN'"
+          [ "$REWOUND" = 'false' ] || fail "nothing should have been rewound, got '$REWOUND'"
+
+      - name: Second pass - the checkpoint now drives the window
+        id: second
+        uses: ./
+        with:
+          checkpoint: 'true'
+          checkpoint-namespace: ${{ env.NS }}
+          overlap-seconds: '60'
+
+      - name: The restored checkpoint must outrank the run history
+        env:
+          KIND: ${{ steps.second.outputs.checkpoint-kind }}
+          RESUMABLE: ${{ steps.second.outputs.resumable }}
+          SOURCE: ${{ steps.second.outputs.source }}
+          CP_TS: ${{ steps.second.outputs.checkpoint-timestamp }}
+          FROM: ${{ steps.second.outputs.from }}
+          SCANNED: ${{ steps.second.outputs.runs-scanned }}
+          SEEN: ${{ steps.second.outputs.seen-ids-count }}
+          SEEN_FILE: ${{ steps.second.outputs.seen-ids-file }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "$KIND" = 'timestamp' ] || fail "expected kind=timestamp, got '$KIND'"
+          [ "$RESUMABLE" = 'true' ] || fail "expected resumable=true, got '$RESUMABLE'"
+          [ "$CP_TS" = '2026-01-02T03:04:05Z' ] || fail "expected the committed mark, got '$CP_TS'"
+
+          # The point of the whole exercise: the window comes from the DATA's clock, and
+          # the run history is not consulted at all.
+          [ "$SOURCE" = 'checkpoint' ] || fail "expected source=checkpoint, got '$SOURCE'"
+          [ "$SCANNED" = '0' ] || fail "the run history should not have been read, but scanned $SCANNED"
+          [ "$FROM" = '2026-01-02T03:03:05Z' ] || fail "expected the mark minus a 60s overlap, got '$FROM'"
+
+          [ "$SEEN" = '2' ] || fail "expected 2 remembered ids, got '$SEEN'"
+          grep -qx alpha "$SEEN_FILE" || fail "the seen-ids file is missing 'alpha'"
+          grep -qx beta "$SEEN_FILE" || fail "the seen-ids file is missing 'beta'"
+          echo "checkpoint leg ok: window from $FROM, $SEEN id(s) suppressed"
+
+      - name: A rewind must be refused
+        id: rewind
+        uses: ./save
+        with:
+          checkpoint-namespace: ${{ env.NS }}
+          timestamp: '2020-01-01T00:00:00Z'
+
+      - name: The mark must not have moved backwards
+        env:
+          TS: ${{ steps.rewind.outputs.timestamp }}
+          REWOUND: ${{ steps.rewind.outputs.rewound }}
+        run: |
+          set -euo pipefail
+          if [ "$TS" != '2026-01-02T03:04:05Z' ] || [ "$REWOUND" != 'false' ]; then
+            echo "::error::a backwards timestamp should have been refused, but the mark is now '$TS' (rewound=$REWOUND)"
+            exit 1
+          fi
+          echo "rewind guard ok: the mark is still $TS"
