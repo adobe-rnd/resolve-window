@@ -479,6 +479,30 @@ run_script '' GITHUB_TOKEN=''
 expect_rc 1
 expect_stderr_has 'GITHUB_TOKEN is required'
 
+# --- 18. the request carries no server-side filters -------------------------
+#
+# This one is a SOURCE check, not a behavioural one - the fixture tests never build a URL, so
+# nothing else here would notice `?status=success` being added back as an optimisation. It
+# would look like a speed-up and pass every other assertion, while reintroducing the exact
+# defect the local filtering exists to avoid: on a workflow with ~28,000 runs, five identical
+# ?status=success calls returned total_count between 716 and 12,670, with months-stale pages.
+# A poisoned response moves the watermark hours in either direction, which drops publishes.
+
+start 'the runs URL carries no status or branch filter (source check)'
+url_line=$(grep -n 'actions/workflows/' "$SCRIPT" | grep 'runs?' || true)
+if [ -z "$url_line" ]; then
+  bad 'the runs URL could not be found in the script'
+else
+  case "$url_line" in
+    *status=* | *conclusion=* | *branch=* | *head_branch=*)
+      bad "the runs URL sends a server-side filter, which is not dependable at scale: $url_line"
+      ;;
+    *)
+      ok 'the runs URL sends only per_page and page'
+      ;;
+  esac
+fi
+
 rm -rf "$WORKDIR"
 # --- summary ---------------------------------------------------------------
 
