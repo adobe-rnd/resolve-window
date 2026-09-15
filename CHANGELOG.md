@@ -36,13 +36,16 @@ defaults to `false`, and with it off the action behaves exactly as 1.0.0 did.
   the cache, since both derive the same immutable key, so the next run would restore the first
   commit and re-read everything after it. Found by reading the CI log of a green run, where it
   appeared only as `Cache save failed`.
-- `tests/checkpoint.test.sh`, 104 assertions on restoring and committing, and `checkpoint-smoke.yml`,
+- `tests/checkpoint.test.sh`, 108 assertions on restoring and committing, and `checkpoint-smoke.yml`,
   which uses a fixed namespace and advances the mark so each run must restore what its predecessor
   committed. The in-job Test leg deliberately uses a namespace unique per run attempt, because a
   fixed one would make it restore its own previous state and its cold-start assertion would pass
   once and then fail forever.
 
 ### Changed
+
+- `actions/cache` restore and save pinned to v6, which runs on Node 24. v4 is forced onto Node 24
+  by the runner anyway and warns about it on every run.
 
 - `tests/action-contract.test.sh` now covers both action files and, additionally, checks that this
   repository's own workflows only read outputs the actions declare. That check immediately found

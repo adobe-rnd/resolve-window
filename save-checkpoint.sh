@@ -36,6 +36,9 @@ SEEN_WINDOW_SECONDS="${SEEN_WINDOW_SECONDS:-60}"
 ALLOW_REWIND="${ALLOW_REWIND:-false}"
 RUN_ID="${GITHUB_RUN_ID:-}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}"
+# Identifies the cache entry this checkpoint will be stored under. Recorded so a second
+# commit can tell a real key collision from a deliberate second namespace.
+KEY_PREFIX="${KEY_PREFIX:-}"
 NOW_EPOCH="${NOW_EPOCH:-}"
 
 die() { echo "::error::$*" >&2; exit 1; }
@@ -79,19 +82,27 @@ mkdir -p "${CHECKPOINT_FILE%/*}"
 prev_timestamp=''
 prev_seen='[]'
 prev_run=''
+prev_key=''
 if [ -f "$CHECKPOINT_FILE" ] && jq -e . "$CHECKPOINT_FILE" >/dev/null 2>&1; then
   prev_timestamp=$(jq -r '.timestamp // ""' "$CHECKPOINT_FILE")
   prev_seen=$(jq -c '(.seen // []) | map(select(.id != null and .atEpoch != null))' "$CHECKPOINT_FILE")
   prev_run=$(jq -r 'if .runId == null then "" else "\(.runId)-\(.runAttempt // "")" end' "$CHECKPOINT_FILE")
+  prev_key=$(jq -r '.keyPrefix // ""' "$CHECKPOINT_FILE")
 fi
 
 # Committing twice in one run attempt is worth saying out loud, because the second commit
-# reaches the FILE but cannot reach the cache: entries are immutable, and both saves derive
-# the same key from the same namespace, run id and attempt. The next run would then restore
-# the FIRST commit and quietly re-read everything after it. Give it its own namespace, or
-# commit once at the end.
+# reaches the FILE but cannot reach the cache: entries are immutable, so the same key cannot
+# be rewritten. The next run would then restore the FIRST commit and quietly re-read
+# everything after it.
+#
+# The hazard is the KEY, not the file. A caller that deliberately gives the second commit its
+# own namespace writes a different key, and nothing is lost - so comparing run ids alone
+# reports the remedy as if it were the problem. Only warn when the keys also match, or when
+# they are unknown and a collision therefore cannot be ruled out.
 if [ -n "$prev_run" ] && [ -n "$RUN_ID" ] && [ "$prev_run" = "$RUN_ID-$RUN_ATTEMPT" ]; then
-  warn "this run already committed a checkpoint. The file will be updated, but the cache entry for this run cannot be rewritten, so the next run would restore the earlier commit. Commit once per run, or give this step its own checkpoint-namespace."
+  if [ -z "$prev_key" ] || [ -z "$KEY_PREFIX" ] || [ "$prev_key" = "$KEY_PREFIX" ]; then
+    warn "this run already committed a checkpoint. The file will be updated, but the cache entry for this run cannot be rewritten, so the next run would restore the earlier commit. Commit once per run, or give this step its own checkpoint-namespace."
+  fi
 fi
 
 # --- settle the timestamp, guarding against a rewind -----------------------
@@ -206,6 +217,7 @@ jq -n \
   --arg committedAt "$COMMITTED_AT" \
   --arg runId "$RUN_ID" \
   --arg runAttempt "$RUN_ATTEMPT" \
+  --arg keyPrefix "$KEY_PREFIX" \
   --argjson seen "$merged" '
     {
       kind: $kind,
@@ -215,6 +227,7 @@ jq -n \
       committedAt: $committedAt,
       runId: $runId,
       runAttempt: $runAttempt,
+      keyPrefix: $keyPrefix,
       seen: $seen
     }' > "$TMP"
 mv "$TMP" "$CHECKPOINT_FILE"

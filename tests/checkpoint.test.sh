@@ -307,6 +307,22 @@ expect_stderr_has 'already committed a checkpoint'
 # that genuinely wants two commits in one run can give the second its own namespace.
 expect_json "$CP" '.timestamp' '2026-09-15T11:00:00Z'
 
+start 'a second commit under its own cache key is not a double commit'
+CP=$(fresh)
+run_save "$CP" TIMESTAMP='2026-09-15T10:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1' KEY_PREFIX='rw-main'
+run_save "$CP" TIMESTAMP='2026-09-15T11:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1' KEY_PREFIX='rw-other'
+expect_rc 0
+# The remedy must not be reported as the problem: a different namespace means a different
+# key, so nothing is lost and there is nothing to warn about.
+expect_stderr_lacks 'already committed a checkpoint'
+
+start 'a second commit under the same cache key is a double commit'
+CP=$(fresh)
+run_save "$CP" TIMESTAMP='2026-09-15T10:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1' KEY_PREFIX='rw-main'
+run_save "$CP" TIMESTAMP='2026-09-15T11:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1' KEY_PREFIX='rw-main'
+expect_rc 0
+expect_stderr_has 'already committed a checkpoint'
+
 start 'a later run committing over an earlier one is not a double commit'
 CP=$(fresh)
 run_save "$CP" TIMESTAMP='2026-09-15T10:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1'
