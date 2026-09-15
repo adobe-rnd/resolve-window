@@ -39,6 +39,64 @@ jobs:
         with:
           initial-window: 30d
 
+      # The one path `uses: ./` cannot validate: a SUBDIRECTORY reference to a published tag.
+      # GitHub downloads the whole repository and points GITHUB_ACTION_PATH at save/, so the
+      # sub-action reaches its scripts through '..'. That is reasoning about the packaging
+      # format, and reasoning is not evidence, so it gets exercised against the real tag.
+      - name: Restore a checkpoint through the published tag
+        id: cp-restore
+        uses: adobe-rnd/resolve-window@v1
+        with:
+          checkpoint: 'true'
+          checkpoint-namespace: released-smoke
+          initial-window: 1h
+
+      - name: Commit one through the published sub-action
+        id: cp-save
+        uses: adobe-rnd/resolve-window/save@v1
+        with:
+          checkpoint-namespace: released-smoke
+          timestamp: ${{ steps.cp-restore.outputs.to }}
+          seen-ids: released-${{ github.run_id }}
+          seen-window-seconds: '60'
+
+      - name: The published checkpoint pair must agree
+        env:
+          KIND: ${{ steps.cp-restore.outputs.checkpoint-kind }}
+          RESUMED: ${{ steps.cp-restore.outputs.resumable }}
+          CP_SOURCE: ${{ steps.cp-restore.outputs.source }}
+          MARK: ${{ steps.cp-save.outputs.timestamp }}
+          WANTED: ${{ steps.cp-restore.outputs.to }}
+          REWOUND: ${{ steps.cp-save.outputs.rewound }}
+          SEEN: ${{ steps.cp-save.outputs.seen-ids-count }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          # An empty output here is the signature of a sub-action that resolved but could not
+          # find its scripts, which would otherwise look like a pass.
+          [ -n "$MARK" ] || fail 'the save sub-action produced no timestamp; check it can reach ../save-checkpoint.sh'
+          [ "$MARK" = "$WANTED" ] || fail "expected the mark to become $WANTED, got $MARK"
+          [ "$REWOUND" = 'false' ] || fail 'the mark was rewound, which cannot happen with a forward clock'
+          [ "$SEEN" -ge 1 ] || fail "expected at least one remembered id, got '$SEEN'"
+
+          case "$KIND" in
+            none)
+              # First run after release, or the cache was evicted. Must still have a window.
+              case "$CP_SOURCE" in
+                last-success | initial-window) ;;
+                *) fail "cold checkpoint fell back to '$CP_SOURCE'" ;;
+              esac
+              echo "checkpoint leg: cold start, fell back to $CP_SOURCE"
+              ;;
+            timestamp)
+              [ "$RESUMED" = 'true' ] || fail "kind=timestamp but resumable='$RESUMED'"
+              [ "$CP_SOURCE" = 'checkpoint' ] || fail "a restored checkpoint must drive the window, got '$CP_SOURCE'"
+              echo "checkpoint leg: resumed a published checkpoint, now at $MARK"
+              ;;
+            *) fail "unexpected checkpoint-kind '$KIND'" ;;
+          esac
+
       - name: The released action must behave
         env:
           SOURCE: ${{ steps.released.outputs.source }}
