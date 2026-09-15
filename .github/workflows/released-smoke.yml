@@ -1,0 +1,74 @@
+name: Released smoke
+
+# Consumes the PUBLISHED action by tag, exactly as another repository would.
+#
+# The Test workflow uses `uses: ./`, which validates the working tree but proves nothing
+# about whether a consumer can resolve `@v1`. That is a different failure: a major alias
+# left behind by a bad release, or a tag missing action.yml, breaks every downstream
+# scheduled job while this repository's own CI stays green.
+#
+# Runs weekly rather than on push, because it deliberately tests the released version and
+# not the commit that triggered it.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  consume:
+    name: Consume adobe-rnd/resolve-window@v1
+    runs-on: ubuntu-latest
+    steps:
+      # Deterministic leg: no dependency on this workflow's own history.
+      - name: Resolve a window from the released action
+        id: released
+        uses: adobe-rnd/resolve-window@v1
+        with:
+          override-start-time: 90m
+
+      # Live leg: reads this workflow's run history through the released action.
+      # initial-window keeps the first ever run green.
+      - name: Resolve from the real run history
+        id: live
+        uses: adobe-rnd/resolve-window@v1
+        with:
+          initial-window: 30d
+
+      - name: The released action must behave
+        env:
+          SOURCE: ${{ steps.released.outputs.source }}
+          AGE: ${{ steps.released.outputs.age-seconds }}
+          FROM: ${{ steps.released.outputs.from }}
+          LIVE_SOURCE: ${{ steps.live.outputs.source }}
+          LIVE_WATERMARK: ${{ steps.live.outputs.watermark }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [ "$SOURCE" = 'override' ] || fail "override leg: source was '$SOURCE'"
+          [ "$AGE" -ge 5390 ] && [ "$AGE" -le 5500 ] \
+            || fail "override leg: 90m should be about 5400s, got ${AGE}s"
+          [[ "$FROM" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+            || fail "override leg: from is not RFC 3339: '$FROM'"
+
+          case "$LIVE_SOURCE" in
+            last-success | initial-window) ;;
+            *) fail "live leg: unexpected source '$LIVE_SOURCE'" ;;
+          esac
+          [ -n "$LIVE_WATERMARK" ] || fail 'live leg: no watermark'
+
+          {
+            echo "### Released action smoke"
+            echo ""
+            echo "\`adobe-rnd/resolve-window@v1\` resolved a window."
+            echo ""
+            echo "| leg | source | value |"
+            echo "| --- | --- | --- |"
+            echo "| override 90m | $SOURCE | from \`$FROM\`, age ${AGE}s |"
+            echo "| live history | $LIVE_SOURCE | watermark \`$LIVE_WATERMARK\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
