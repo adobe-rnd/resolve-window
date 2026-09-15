@@ -8,7 +8,7 @@ For an action, the public interface is the set of inputs, the set of outputs, an
 under which the action fails. A change that makes the action fail where it used to succeed is a
 breaking change even when no input changed, because it will stop a consumer's scheduled job.
 
-## [Unreleased]
+## [1.0.0] - 2026-09-15
 
 ### Added
 
