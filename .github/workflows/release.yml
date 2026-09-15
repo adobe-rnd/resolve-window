@@ -45,7 +45,10 @@ jobs:
       - name: Unit tests
         run: bash tests/resolve-window.test.sh
 
-      - name: Action contract
+      - name: Checkpoint tests
+        run: bash tests/checkpoint.test.sh
+
+      - name: Action contracts
         run: bash tests/action-contract.test.sh
 
       - name: Smoke test the action itself
