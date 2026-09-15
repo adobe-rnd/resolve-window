@@ -93,6 +93,7 @@ run_script() {
     export GITHUB_OUTPUT=''
     export GITHUB_TOKEN=''
     for kv in "$@"; do
+      # shellcheck disable=SC2163 # kv is a NAME=VALUE pair, not the name of a variable
       export "$kv"
     done
     bash "$SCRIPT" 2>"$errfile"
@@ -288,7 +289,10 @@ expect_rc 0
 expect_output watermark "$OLD"
 
 start 'rejects an unparseable initial-window'
-run_script "$D" INITIAL_WINDOW='last tuesday'
+# Deliberately a token no date(1) accepts. Relative English dates such as
+# "last tuesday" are NOT a valid fixture here: GNU date parses them happily and BSD
+# date does not, so the case would assert the platform rather than the validation.
+run_script "$D" INITIAL_WINDOW='xyzzy'
 expect_rc 1
 expect_stderr_has 'INITIAL_WINDOW is neither a duration'
 
@@ -334,7 +338,7 @@ expect_rc 0
 expect_output watermark "$(iso $((NOW - 2700)))"
 
 start 'rejects an unparseable override-start-time'
-run_script "$D" OVERRIDE_START_TIME='yesterday-ish'
+run_script "$D" OVERRIDE_START_TIME='xyzzy'
 expect_rc 1
 expect_stderr_has 'OVERRIDE_START_TIME is neither a duration'
 

@@ -93,8 +93,13 @@ for var in OVERLAP_SECONDS MAX_PAGES PER_PAGE WIDE_WINDOW_HOURS; do
   fi
 done
 
-[ "$MAX_PAGES" -ge 1 ] || die "MAX_PAGES must be at least 1"
-[ "$PER_PAGE" -ge 1 ] && [ "$PER_PAGE" -le 100 ] || die "PER_PAGE must be between 1 and 100"
+if [ "$MAX_PAGES" -lt 1 ]; then
+  die "MAX_PAGES must be at least 1"
+fi
+
+if [ "$PER_PAGE" -lt 1 ] || [ "$PER_PAGE" -gt 100 ]; then
+  die "PER_PAGE must be between 1 and 100"
+fi
 
 # GNU date first, BSD/macOS second, so the action is not silently Linux-only.
 to_epoch() {
