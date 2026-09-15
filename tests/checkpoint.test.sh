@@ -289,6 +289,38 @@ run_save "$CP" TIMESTAMP='xyzzy'
 expect_rc 1
 expect_stderr_has 'not a parseable timestamp'
 
+# --- save: committing twice in one run -------------------------------------
+#
+# The second commit reaches the file but cannot reach the cache, because both saves derive
+# the same immutable key from the same run id and attempt. Silent in v1.1.0 CI until the log
+# was read, so it gets a warning and a test.
+
+start 'warns when the same run attempt commits twice'
+CP=$(fresh)
+run_save "$CP" TIMESTAMP='2026-09-15T10:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1'
+expect_rc 0
+expect_stderr_lacks 'already committed a checkpoint'
+run_save "$CP" TIMESTAMP='2026-09-15T11:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1'
+expect_rc 0
+expect_stderr_has 'already committed a checkpoint'
+# It is a warning, not a refusal: the file must still hold the newer mark, since a caller
+# that genuinely wants two commits in one run can give the second its own namespace.
+expect_json "$CP" '.timestamp' '2026-09-15T11:00:00Z'
+
+start 'a later run committing over an earlier one is not a double commit'
+CP=$(fresh)
+run_save "$CP" TIMESTAMP='2026-09-15T10:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1'
+run_save "$CP" TIMESTAMP='2026-09-15T11:00:00Z' GITHUB_RUN_ID='222' GITHUB_RUN_ATTEMPT='1'
+expect_rc 0
+expect_stderr_lacks 'already committed a checkpoint'
+
+start 'a retried attempt of the same run is not a double commit'
+CP=$(fresh)
+run_save "$CP" TIMESTAMP='2026-09-15T10:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='1'
+run_save "$CP" TIMESTAMP='2026-09-15T11:00:00Z' GITHUB_RUN_ID='111' GITHUB_RUN_ATTEMPT='2'
+expect_rc 0
+expect_stderr_lacks 'already committed a checkpoint'
+
 # --- save: the rewind guard ------------------------------------------------
 
 start 'refuses to move the mark backwards'

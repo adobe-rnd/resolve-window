@@ -78,9 +78,20 @@ mkdir -p "${CHECKPOINT_FILE%/*}"
 
 prev_timestamp=''
 prev_seen='[]'
+prev_run=''
 if [ -f "$CHECKPOINT_FILE" ] && jq -e . "$CHECKPOINT_FILE" >/dev/null 2>&1; then
   prev_timestamp=$(jq -r '.timestamp // ""' "$CHECKPOINT_FILE")
   prev_seen=$(jq -c '(.seen // []) | map(select(.id != null and .atEpoch != null))' "$CHECKPOINT_FILE")
+  prev_run=$(jq -r 'if .runId == null then "" else "\(.runId)-\(.runAttempt // "")" end' "$CHECKPOINT_FILE")
+fi
+
+# Committing twice in one run attempt is worth saying out loud, because the second commit
+# reaches the FILE but cannot reach the cache: entries are immutable, and both saves derive
+# the same key from the same namespace, run id and attempt. The next run would then restore
+# the FIRST commit and quietly re-read everything after it. Give it its own namespace, or
+# commit once at the end.
+if [ -n "$prev_run" ] && [ -n "$RUN_ID" ] && [ "$prev_run" = "$RUN_ID-$RUN_ATTEMPT" ]; then
+  warn "this run already committed a checkpoint. The file will be updated, but the cache entry for this run cannot be rewritten, so the next run would restore the earlier commit. Commit once per run, or give this step its own checkpoint-namespace."
 fi
 
 # --- settle the timestamp, guarding against a rewind -----------------------

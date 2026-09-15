@@ -246,11 +246,16 @@ jobs:
           grep -qx beta "$SEEN_FILE" || fail "the seen-ids file is missing 'beta'"
           echo "checkpoint leg ok: window from $FROM, $SEEN id(s) suppressed"
 
+      # A distinct namespace, so this second commit does not collide with the first on a
+      # cache key that cannot be rewritten - which is exactly what save now warns about.
+      # Pointing checkpoint-file at the first step's file keeps the mark being tested the
+      # same one, and covers the checkpoint-file override at the same time.
       - name: A rewind must be refused
         id: rewind
         uses: ./save
         with:
-          checkpoint-namespace: ${{ env.NS }}
+          checkpoint-namespace: ${{ env.NS }}-rewind
+          checkpoint-file: ${{ steps.first.outputs.checkpoint-file }}
           timestamp: '2020-01-01T00:00:00Z'
 
       - name: The mark must not have moved backwards

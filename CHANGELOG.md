@@ -32,7 +32,11 @@ defaults to `false`, and with it off the action behaves exactly as 1.0.0 did.
   following run re-read the same span.
 - Outputs `checkpoint-kind`, `resumable`, `cursor`, `page`, `checkpoint-timestamp`,
   `committed-at`, `committed-run`, `seen-ids-file`, `seen-ids-count` and `checkpoint-file`.
-- `tests/checkpoint.test.sh`, 95 assertions on restoring and committing, and `checkpoint-smoke.yml`,
+- A warning when the same run attempt commits twice. The second commit reaches the file but not
+  the cache, since both derive the same immutable key, so the next run would restore the first
+  commit and re-read everything after it. Found by reading the CI log of a green run, where it
+  appeared only as `Cache save failed`.
+- `tests/checkpoint.test.sh`, 104 assertions on restoring and committing, and `checkpoint-smoke.yml`,
   which uses a fixed namespace and advances the mark so each run must restore what its predecessor
   committed. The in-job Test leg deliberately uses a namespace unique per run attempt, because a
   fixed one would make it restore its own previous state and its cold-start assertion would pass

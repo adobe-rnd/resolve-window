@@ -162,6 +162,10 @@ Two further deliberate choices:
 - **The save step is explicit, not a `post:` hook.** Composite actions cannot declare one, and that
   turns out to be better: the position must not advance when the drain or the fan-out failed.
   `if: success()` says so in the workflow, where a reader can see it.
+- **Commit once per run.** A second save in the same run attempt reaches the file but not the
+  cache, because both derive the same key and cache entries cannot be rewritten - so the next run
+  would restore the *first* commit and re-read everything after it. The step warns when it sees
+  this. If you genuinely need two, give the second its own `checkpoint-namespace`.
 - **A mark that moves backwards is refused**, with a warning, keeping the newer value. A late batch
   containing older records must not drag the mark back, or every following run re-reads the same
   span. Pass `allow-rewind: 'true'` when you genuinely mean to reprocess.
