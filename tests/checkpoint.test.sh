@@ -42,6 +42,12 @@ run_restore() {
   local cp="$1"
   shift
   local errfile="$WORKDIR/err.restore"
+  # The environment is built INSIDE the subshell on purpose: each call must run the script
+  # with a known environment and leave the caller's untouched. Nothing outside the subshell
+  # reads these variables, so shellcheck's warning that the changes are lost is the point.
+  # (Also the only portable option here: a prefix assignment cannot set a variable for a
+  # script invoked through several layers, and `env VAR=VAL` is not dependable everywhere.)
+  # shellcheck disable=SC2030,SC2031
   OUT=$(
     export CHECKPOINT_FILE="$cp"
     export GITHUB_OUTPUT=''
@@ -59,6 +65,12 @@ run_save() {
   local cp="$1"
   shift
   local errfile="$WORKDIR/err.save"
+  # The environment is built INSIDE the subshell on purpose: each call must run the script
+  # with a known environment and leave the caller's untouched. Nothing outside the subshell
+  # reads these variables, so shellcheck's warning that the changes are lost is the point.
+  # (Also the only portable option here: a prefix assignment cannot set a variable for a
+  # script invoked through several layers, and `env VAR=VAL` is not dependable everywhere.)
+  # shellcheck disable=SC2030,SC2031
   OUT=$(
     export CHECKPOINT_FILE="$cp"
     export NOW_EPOCH="$NOW"

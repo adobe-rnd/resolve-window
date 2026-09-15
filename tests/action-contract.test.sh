@@ -143,14 +143,16 @@ check_action() {
 
   # 7. every script the action invokes exists at the path it uses
   local missing=''
-  local rel
-  for rel in $(grep -oE 'GITHUB_ACTION_PATH/[^"]+\.sh' "$file" | sed 's|GITHUB_ACTION_PATH/||' | sort -u); do
-    local resolved
-    resolved=$(cd "$(dirname "$file")" && cd "$(dirname "$rel")" 2>/dev/null && pwd)/$(basename "$rel")
+  grep -oE 'GITHUB_ACTION_PATH/[^"]+\.sh' "$file" | sed 's|GITHUB_ACTION_PATH/||' | sort -u > "$WORK/scripts"
+  local rel resolved dir
+  while read -r rel; do
+    [ -n "$rel" ] || continue
+    dir=$(cd "$(dirname "$file")" && cd "$(dirname "$rel")" 2>/dev/null && pwd)
+    resolved="$dir/$(basename "$rel")"
     if [ ! -f "$resolved" ]; then
       missing="$missing $rel"
     fi
-  done
+  done < "$WORK/scripts"
   if [ -z "$missing" ]; then
     ok "$label: every script it invokes exists"
   else
@@ -221,7 +223,9 @@ for wf in "$ROOT"/.github/workflows/*.yml; do
 
   bad_refs=""
   checked=0
-  for ref in $(grep -oE "steps\.[a-zA-Z0-9_-]+\.outputs\.[a-zA-Z0-9_-]+" "$wf" | sort -u); do
+  grep -oE "steps\.[a-zA-Z0-9_-]+\.outputs\.[a-zA-Z0-9_-]+" "$wf" | sort -u > "$WORK/refs"
+  while read -r ref; do
+    [ -n "$ref" ] || continue
     sid=$(printf "%s" "$ref" | cut -d. -f2)
     oname=$(printf "%s" "$ref" | cut -d. -f4)
 
@@ -239,7 +243,7 @@ for wf in "$ROOT"/.github/workflows/*.yml; do
     if ! grep -qx "$oname" "$list"; then
       bad_refs="$bad_refs $sid.$oname"
     fi
-  done
+  done < "$WORK/refs"
 
   if [ -z "$bad_refs" ] && [ "$checked" -gt 0 ]; then
     ok "$wf_name: all $checked action-output reference(s) are declared"
